@@ -1,0 +1,2 @@
+aws-sam-cli==1.22.0
+git-remote-codecommit==1.15.1

@@ -1,0 +1,52 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: IAM Definitions
+
+Resources:
+  FargateTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AmazonECSTaskExecutionRolePolicy
+          PolicyDocument:
+            Statement:
+            - Effect: Allow
+              Action:
+                # Allow the ECS tasks to upload logs to CloudWatch
+                - 'logs:CreateLogStream'
+                - 'logs:PutLogEvents'
+              Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*:*:*"
+        #need capability to list kms key alias in order to lookup the keyid required for local region decryption
+        - PolicyName: ListAliasPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'kms:ListAliases'
+                Resource:
+                  - '*'
+
+Outputs:
+  Name:
+    Description: Stack Name
+    Value: !Ref AWS::StackName
+    Export:
+      Name: !Sub ${AWS::StackName}-Name
+
+  FargateTaskRoleArn:
+    Value: !GetAtt FargateTaskRole.Arn
+    Export:
+      Name:  !Sub ${AWS::StackName}-FargateTaskRoleArn
+
+  FargateTaskRoleName:
+    Value: !Ref FargateTaskRole
+    Export:
+      Name:  !Sub ${AWS::StackName}-FargateTaskRoleName

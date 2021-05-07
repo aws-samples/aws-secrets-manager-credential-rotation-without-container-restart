@@ -1,0 +1,10 @@
+db-passwords.env
+aws.env
+aws.sh
+gitCredentials.csv
+app/mydatabase 
+
+
+*.swp
+__pycache__
+*.pyc

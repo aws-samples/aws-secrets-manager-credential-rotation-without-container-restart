@@ -1,0 +1,11 @@
+tmp/
+client-side-encryption/
+
+*.swp
+
+*.pem
+
+aws.sh
+credentials.csv
+
+packaged*.yaml

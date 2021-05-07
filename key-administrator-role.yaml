@@ -1,0 +1,47 @@
+AWSTemplateFormatVersion: 2010-09-09
+Resources:
+  KeyAdministratorManagedPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: "Key Administrator Policy to enable management of KMS CMKs and allow direct access to key metadata. Denies are placed to prevent cryptographic operations and delete operations, in order to maintain separation of duties"
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'kms:Create*'
+              - 'kms:Describe*'
+              - 'kms:Enable*'
+              - 'kms:List*'
+              - 'kms:Put*'
+              - 'kms:Update*'
+              - 'kms:RevokeGrant'
+              - 'kms:Get*'
+              - 'kms:CancelKeyDeletion'
+              - 'kms:TagResource'
+              - 'kms:UntagResource'
+            Resource: "*"
+          - Effect: Deny
+            Action:
+              - 'kms:DeleteImportedKeyMaterial'
+              - 'kms:DisableKey'
+              - 'kms:DisableKeyRotation'
+              - 'kms:ScheduleKeyDeletion'
+            Resource: "*"
+
+  KeyAdministratorRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: KeyAdministratorRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS:
+                - !Sub ${AWS::AccountId}
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - !Ref KeyAdministratorManagedPolicy

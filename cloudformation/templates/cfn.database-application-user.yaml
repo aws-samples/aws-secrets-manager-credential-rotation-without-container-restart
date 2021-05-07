@@ -1,0 +1,109 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: RDS Database Application User Creation
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 180
+
+Parameters:
+  pAppPrivateSubnetA:
+    Description: WebApp Subnet A
+    Type: AWS::EC2::Subnet::Id
+  pAppPrivateSubnetB:
+    Description: WebApp Subnet A
+    Type: AWS::EC2::Subnet::Id
+  pAppSecurityGroup:
+    Description: WebApp Security Group
+    Type: String
+  pDatabaseMaserUserSecretsManagerArn:
+    Description: Master User Database Secrets Manager Arn
+    Type: String
+  pDatabaseApplicationUserSecretsManagerArn:
+    Description: Application User Database Secrets Manager Arn
+    Type: String
+
+Resources:
+  CreateRDSApplicationUserRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+              - "lambda.amazonaws.com"
+          Action:
+            - sts:AssumeRole
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+      Policies:
+        - PolicyName: MasterSecretGetValue
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - 'secretsmanager:GetSecretValue'
+                Effect: Allow
+                Resource: !Ref pDatabaseMaserUserSecretsManagerArn
+
+  CreateRDSApplicationUserFunction:
+    # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Creates database application user
+      Timeout: 45
+      Role: !GetAtt CreateRDSApplicationUserRole.Arn
+      CodeUri: ../functions/source/create-application-user
+      Handler: app.lambda_handler
+      Runtime: python3.8
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref pAppSecurityGroup
+        SubnetIds:
+          - !Ref pAppPrivateSubnetA
+          - !Ref pAppPrivateSubnetB 
+      Environment:
+        Variables:
+          ApplicationUserSecretsManagerArn: !Ref pDatabaseApplicationUserSecretsManagerArn
+          MasterUserSecretsManagerArn: !Ref pDatabaseMaserUserSecretsManagerArn
+
+  DatabaseMasterUserSecretsResourcePolicyForCreateRDSApplicationUserFunction:
+    Type: AWS::SecretsManager::ResourcePolicy
+    Properties:
+      SecretId:  !Ref pDatabaseMaserUserSecretsManagerArn
+      ResourcePolicy:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !GetAtt CreateRDSApplicationUserRole.Arn
+            Action:
+              - 'secretsmanager:GetSecretValue'
+            Resource: "*"
+
+  DatabaseApplicationUserSecretsResourcePolicyForCreateRDSApplicationUserFunction:
+    Type: AWS::SecretsManager::ResourcePolicy
+    Properties:
+      SecretId:  !Ref pDatabaseApplicationUserSecretsManagerArn
+      ResourcePolicy:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !GetAtt CreateRDSApplicationUserRole.Arn
+            Action:
+              - 'secretsmanager:GetSecretValue'
+            Resource: "*"
+
+Outputs:
+  StackName:
+    Value: !Ref AWS::StackName
+    Export:
+      Name: !Sub "${AWS::StackName}-StackName"
+  CreateRDSApplicationUserFunctionArn:
+    Value: !GetAtt CreateRDSApplicationUserFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-CreateRDSApplicationUserFunctionArn"
+    

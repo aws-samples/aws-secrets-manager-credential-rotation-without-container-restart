@@ -1,0 +1,4 @@
+#install latest
+pymysql
+crhelper==2.0.10
+boto3==1.17.54

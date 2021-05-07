@@ -1,0 +1,2 @@
+#install latest
+pymysql==1.0.2

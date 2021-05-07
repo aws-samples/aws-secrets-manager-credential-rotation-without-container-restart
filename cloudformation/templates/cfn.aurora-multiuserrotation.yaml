@@ -1,0 +1,578 @@
+#https://github.com/aws-samples/startup-kit-templates/blob/master/templates/aurora.cfn.yml
+#---
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: Aurora Database Cluster
+
+# Create the Aurora MySQL or PostgreSQL database(s). Currently, this template only supports alarms for Aurora MySQL.
+
+Parameters:
+  EncryptionAtRestCMKArn:
+    Type: String
+
+  NetworkStackName:
+    Description: Name of an active CloudFormation stack that contains networking resources
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: "^[a-zA-Z][-a-zA-Z0-9]*$"
+
+  DatabaseName:
+    Default: StartupDB
+    Type: String
+    Description: Database name
+    MinLength: 1
+    MaxLength: 30
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9]*"
+    ConstraintDescription: Name must begin with a letter and contain only alphanumeric characters
+
+  DatabaseEngine:
+    Default: aurora-mysql
+    Type: String
+    Description: Database engines - Aurora MySQL or Aurora PostgreSQL
+    ConstraintDescription: Choose an engine from the drop down
+    AllowedValues:
+      - aurora-mysql
+      - aurora-postgresql
+
+  DatabaseEngineMode:
+    Default: provisioned
+    Type: String
+    Description: The DB engine mode of the DB cluster.
+    ConstraintDescription: Valid values include provisioned or serverless. 
+    AllowedValues:
+      - provisioned
+      - serverless
+
+  EncryptionAtRest:
+    Default: false
+    Type: String
+    Description: The optional flag for encryption at rest (db.t2.small and above)
+    ConstraintDescription: Only true or false are allowed
+    AllowedValues:
+      - true
+      - false
+
+  DatabaseInstanceClass:
+    Default: db.r4.large
+    Type: String
+    Description: "Database instance class, e.g. db.t2.micro (free tier) - Engine support: https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.DBInstanceClass.html"
+    ConstraintDescription: DB instance class not supported
+    AllowedValues:
+      - db.t2.small
+      - db.t2.medium
+      - db.t2.xlarge
+      - db.r4.large
+      - db.r4.xlarge
+      - db.r4.2xlarge
+      - db.r4.4xlarge
+      - db.r4.8xlarge
+      - db.r4.16xlarge
+
+  # The database alarm configuration, currently not supported for Aurora PostgreSQL
+  DatabaseAlarmMaxCpuPercent:
+    Description: Database CPU % max for alarm (currently, Aurora MySQL only)
+    Type: Number
+    Default: 80
+    MinValue: 1
+    MaxValue: 99
+    ConstraintDescription: Must be a percentage between 1-99%
+
+  DatabaseAlarmReadLatencyMaxSeconds:
+    Description: Read latency max for alarm (currently, Aurora MySQL only)
+    Type: Number
+    Default: 1
+    MinValue: 1
+
+  DatabaseAlarmWriteLatencyMaxSeconds:
+    Description: Write latency max for alarm (currently, Aurora MySQL only)
+    Type: Number
+    Default: 1
+    MinValue: 1
+
+  DatabaseAlarmEvaluationPeriods:
+    Description: The number of periods over which data is compared to the specified threshold (currently, Aurora MySQL only)
+    Type: Number
+    Default: 2
+    MinValue: 2
+
+  DatabaseAlarmEvaluationPeriodSeconds:
+    Description: The time over which the specified statistic is applied. Specify time in seconds, in multiples of 60. Enhanced monitoring must be enabled if less than 500 seconds (currently, Aurora MySQL only)
+    Type: Number
+    Default: 300
+    MinValue: 60
+    ConstraintDescription: Must be at least 60 seconds
+
+  EnhancedMonitoring:
+    Default: false
+    Type: String
+    Description: The optional flag for enhanced monitoring (additional charges apply - https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_Monitoring.OS.html) (currently, Aurora MySQL only)
+    ConstraintDescription: Only true or false are allowed
+    AllowedValues:
+      - true
+      - false
+
+  EnableAlarms:
+    Default: false
+    Type: String
+    Description: Set to true to enable (additional charges - https://aws.amazon.com/cloudwatch/pricing/ - currently, Aurora MySQL only)
+    ConstraintDescription: Only true or false are allowed
+    AllowedValues:
+      - true
+      - false
+
+
+Conditions:
+
+  IsAuroraMySQL: !Equals [ !Ref DatabaseEngine, aurora-mysql ]
+
+  AlarmsEnabled: !Equals [ !Ref EnableAlarms, true ]
+
+  EnhancedMonitoringSupprtedAndEnabled: !And
+    - !Condition AlarmsEnabled
+    - !Equals [ !Ref EnhancedMonitoring, true ]
+
+
+Resources:
+  #https://aws.amazon.com/blogs/security/how-to-create-and-retrieve-secrets-managed-in-aws-secrets-manager-using-aws-cloudformation-template/
+  #https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-secretsmanager-rotationschedule.html
+  #https://docs.aws.amazon.com/secretsmanager/latest/userguide/integrating_cloudformation.html
+  #This is a Secret resource with a randomly generated password in its SecretString JSON.
+  rDatabaseCredentialMasterSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: 'This is the database master user credentials for my RDS instance'
+      Name: 'databasecredential-master-user'
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username": "masteruser"}'
+        GenerateStringKey: 'password'
+        PasswordLength: 16
+        ExcludeCharacters: '"@/\'
+  #This is a SecretTargetAttachment resource which updates the referenced Secret resource with properties about
+  #the referenced RDS instance
+  rSecretMasterUserRDSInstanceAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref rDatabaseCredentialMasterSecret
+      TargetId: !Ref AuroraClusterMultipleUser
+      TargetType: AWS::RDS::DBCluster
+  # This is a RotationSchedule resource. It configures rotation of the password for the referenced
+  # secret using a Lambda rotation function. The first rotation happens immediately when
+  # CloudFormation processes this resource type. All subsequent rotations are scheduled according to
+  # the configured rotation rules. We explicitly depend on the SecretTargetAttachment resource to
+  # ensure that the secret contains all the information necessary for rotation to succeed.
+  rDatabaseCredentialMasterSecretRotationSchedule:
+    Type: AWS::SecretsManager::RotationSchedule
+    DependsOn:
+      - rSecretMasterUserRDSInstanceAttachment
+      - rDatabaseCredentialMasterSecretLambdaInvokePermission
+    Properties:
+      SecretId: !Ref rDatabaseCredentialMasterSecret
+      RotationLambdaARN: !GetAtt rDatabaseCredentialMasterUserRotationApplication.Outputs.RotationLambdaARN
+      RotationRules:
+        AutomaticallyAfterDays: 30
+  #This is a Lambda Permission resource that grants Secrets Manager permission to invoke the function
+  rDatabaseCredentialMasterSecretLambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    DependsOn:
+      - rDatabaseCredentialMasterUserRotationApplication
+    Properties:
+      FunctionName: !GetAtt rDatabaseCredentialMasterUserRotationApplication.Outputs.RotationLambdaARN
+      Action: 'lambda:InvokeFunction'
+      Principal: secretsmanager.amazonaws.com
+  #This is the Lambda Rotation function from the Serververless Application Repository.
+  #https://serverlessrepo.aws.amazon.com/applications
+  rDatabaseCredentialMasterUserRotationApplication:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location:
+        #https://docs.aws.amazon.com/secretsmanager/latest/userguide/reference_available-rotation-templates.html
+        ApplicationId: arn:aws:serverlessrepo:us-east-1:297356227824:applications/SecretsManagerRDSMySQLRotationSingleUser
+        SemanticVersion: 1.0.96
+      Parameters:
+        endpoint: !Sub 'https://secretsmanager.${AWS::Region}.amazonaws.com'
+        functionName: 'database-credential-rotation-lambda-master-user'
+        vpcSecurityGroupIds:
+          Fn::ImportValue: !Sub '${NetworkStackName}-AppSecurityGroupID'
+        vpcSubnetIds: !Join
+            - ','
+            - - Fn::ImportValue: !Sub '${NetworkStackName}-PrivateSubnet1ID'
+              - Fn::ImportValue: !Sub '${NetworkStackName}-PrivateSubnet2ID'
+
+
+  rDatabaseCredentialApplicationSecret:
+    Type: AWS::SecretsManager::Secret
+    DependsOn:
+      - rDatabaseCredentialMasterSecret
+    Properties:
+      Description: 'This is the database application user credentials for my RDS instance'
+      Name: 'databasecredential-application-user'
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username": "appuser", "masterarn": "${rDatabaseCredentialMasterSecret}"}'
+        GenerateStringKey: 'password'
+        PasswordLength: 16
+        ExcludeCharacters: '"@/\'
+  rSecretApplicationUserRDSInstanceAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref rDatabaseCredentialApplicationSecret
+      TargetId: !Ref AuroraClusterMultipleUser
+      TargetType: AWS::RDS::DBCluster
+  rDatabaseCredentialApplicationSecretRotationSchedule:
+    Type: AWS::SecretsManager::RotationSchedule
+    DependsOn:
+      - rSecretApplicationUserRDSInstanceAttachment
+      - rDatabaseCredentialApplicationSecretLambdaInvokePermission
+    Properties:
+      SecretId: !Ref rDatabaseCredentialApplicationSecret
+      RotationLambdaARN: !GetAtt rDatabaseCredentialApplicationUserRotationApplication.Outputs.RotationLambdaARN
+      RotationRules:
+        AutomaticallyAfterDays: 30
+  rDatabaseCredentialApplicationSecretLambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    DependsOn:
+      - rDatabaseCredentialMasterUserRotationApplication
+    Properties:
+      FunctionName: !GetAtt rDatabaseCredentialApplicationUserRotationApplication.Outputs.RotationLambdaARN
+      Action: 'lambda:InvokeFunction'
+      Principal: secretsmanager.amazonaws.com
+  rDatabaseCredentialApplicationUserRotationApplication:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location:
+        #https://docs.aws.amazon.com/secretsmanager/latest/userguide/reference_available-rotation-templates.html
+        ApplicationId: arn:aws:serverlessrepo:us-east-1:297356227824:applications/SecretsManagerRDSMySQLRotationMultiUser
+        SemanticVersion: 1.1.8
+      Parameters:
+        masterSecretArn: !Ref rDatabaseCredentialMasterSecret
+        endpoint: !Sub 'https://secretsmanager.${AWS::Region}.amazonaws.com'
+        functionName: 'database-credential-rotation-lambda-application-user'
+        vpcSecurityGroupIds:
+          Fn::ImportValue: !Sub '${NetworkStackName}-AppSecurityGroupID'
+        vpcSubnetIds: !Join
+            - ','
+            - - Fn::ImportValue: !Sub '${NetworkStackName}-PrivateSubnet1ID'
+              - Fn::ImportValue: !Sub '${NetworkStackName}-PrivateSubnet2ID'
+
+  EnhancedMonitoringRole:
+    Type: AWS::IAM::Role
+    Condition: EnhancedMonitoringSupprtedAndEnabled
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
+
+  DatabaseAlarmTopic:
+    Type: AWS::SNS::Topic
+    Condition: AlarmsEnabled
+    Properties:
+      DisplayName: Database Alarm Topic
+      KmsMasterKeyId: 'alias/aws/sns'
+
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Database subnet group
+      SubnetIds:
+      - Fn::ImportValue: !Sub ${NetworkStackName}-PrivateSubnet1ID
+      - Fn::ImportValue: !Sub ${NetworkStackName}-PrivateSubnet2ID
+      Tags:
+      - Key: Name
+        Value: !Ref AWS::StackName
+
+  PostgresAuroraParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: Logging Enabled
+      Family: aurora-postgresql9.6
+      Parameters:
+        auto_explain.log_analyze: 1
+        auto_explain.log_verbose: 1
+        #log all queries
+        log_min_duration_statement: 0
+        log_statement: all
+
+  MySQLAuroraParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: Logging Enabled
+      Family: aurora-mysql5.7
+      Parameters:
+        slow_query_log: 1
+        general_log: 1
+        log_output: FILE
+
+  #https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/AuroraMySQL.Replication.CrossRegion.html
+  #Before you can create an Aurora MySQL DB cluster that is a cross-region Read Replica, you must enable binary logging on your source Aurora MySQL DB cluster. Cross-region replication for Aurora MySQL uses MySQL binary replication to replay changes on the cross-region Read Replica DB cluster.
+  AuroraDBClusterParameterGroup: 
+    Type: "AWS::RDS::DBClusterParameterGroup"
+    Properties: 
+      Parameters: 
+        binlog_format: "MIXED"
+        general_log: 1
+        log_output: FILE
+        slow_query_log: 1
+      Family: "aurora-mysql5.7"
+      Description: "Aurora Cluster Parameter Group"
+
+  AuroraClusterMultipleUser:
+    Type: AWS::RDS::DBCluster
+    Properties:
+      BackupRetentionPeriod: 3
+      EnableIAMDatabaseAuthentication: true
+      Engine: !Ref DatabaseEngine
+      EngineMode: !Ref DatabaseEngineMode
+      MasterUsername: !Join ['', ['{{resolve:secretsmanager:', !Ref rDatabaseCredentialMasterSecret, ':SecretString:username}}' ]]
+      MasterUserPassword: !Join ['', ['{{resolve:secretsmanager:', !Ref rDatabaseCredentialMasterSecret, ':SecretString:password}}' ]]
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      StorageEncrypted: !Ref EncryptionAtRest
+      KmsKeyId: !Ref EncryptionAtRestCMKArn
+      DatabaseName: !Ref DatabaseName
+      DBClusterParameterGroupName: !If [ IsAuroraMySQL,  !Ref AuroraDBClusterParameterGroup, default.aurora-postgresql9.6 ]
+      EnableCloudwatchLogsExports:
+        - audit
+        - error
+        - general
+      Port: !If [ IsAuroraMySQL,  3306, 5432 ]
+      VpcSecurityGroupIds:
+        - Fn::ImportValue: !Sub ${NetworkStackName}-DatabaseGroupID
+    DependsOn: DatabaseSubnetGroup
+
+  AuroraInstance0:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      PubliclyAccessible: false
+      Engine: !Ref DatabaseEngine
+      DBClusterIdentifier: !Ref AuroraClusterMultipleUser
+      DBInstanceClass: !Ref DatabaseInstanceClass
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      StorageEncrypted: !Ref EncryptionAtRest
+      DBParameterGroupName: !If [IsAuroraMySQL, !Ref MySQLAuroraParameterGroup, !Ref PostgresAuroraParameterGroup]
+      MonitoringInterval: !If [ EnhancedMonitoringSupprtedAndEnabled, 60, 0 ]
+      MonitoringRoleArn: !If [ EnhancedMonitoringSupprtedAndEnabled, !GetAtt EnhancedMonitoringRole.Arn, !Ref "AWS::NoValue" ]
+      CopyTagsToSnapshot: true
+      Tags:
+      - Key: Name
+        Value: !Ref AWS::StackName
+    DependsOn: AuroraClusterMultipleUser
+
+  AuroraInstance1:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      PubliclyAccessible: false
+      Engine: !Ref DatabaseEngine
+      DBClusterIdentifier: !Ref AuroraClusterMultipleUser
+      DBInstanceClass: !Ref DatabaseInstanceClass
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      StorageEncrypted: !Ref EncryptionAtRest
+      DBParameterGroupName: !If [IsAuroraMySQL, !Ref MySQLAuroraParameterGroup, !Ref PostgresAuroraParameterGroup]
+      MonitoringInterval: !If [ EnhancedMonitoringSupprtedAndEnabled, 60, 0 ]
+      MonitoringRoleArn: !If [ EnhancedMonitoringSupprtedAndEnabled, !GetAtt EnhancedMonitoringRole.Arn, !Ref "AWS::NoValue" ]
+      CopyTagsToSnapshot: true
+      Tags:
+      - Key: Name
+        Value: !Ref AWS::StackName
+    DependsOn: AuroraClusterMultipleUser
+
+  DatabaseCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: AlarmsEnabled
+    Properties:
+      AlarmDescription: !Sub DB CPU utilization is over ${DatabaseAlarmMaxCpuPercent}% for ${DatabaseAlarmEvaluationPeriods} period(s) of ${DatabaseAlarmEvaluationPeriodSeconds} seconds
+      TreatMissingData: notBreaching
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Unit: Percent
+      Statistic: Average
+      EvaluationPeriods: !Ref DatabaseAlarmEvaluationPeriods
+      Period: !Ref DatabaseAlarmEvaluationPeriodSeconds
+      Threshold: !Ref DatabaseAlarmMaxCpuPercent
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Ref AuroraClusterMultipleUser
+        - Name: Role
+          Value: WRITER
+      AlarmActions:
+        - !Ref DatabaseAlarmTopic
+    DependsOn: AuroraClusterMultipleUser
+
+  DatabaseSelectLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: AlarmsEnabled
+    Properties:
+      AlarmDescription: !Sub DB read latency is over ${DatabaseAlarmReadLatencyMaxSeconds} for ${DatabaseAlarmEvaluationPeriods} period(s) of ${DatabaseAlarmEvaluationPeriodSeconds} seconds
+      TreatMissingData: notBreaching
+      Namespace: AWS/RDS
+      MetricName: SelectLatency
+      Unit: Seconds
+      Statistic: Average
+      EvaluationPeriods: !Ref DatabaseAlarmEvaluationPeriods
+      Period: !Ref DatabaseAlarmEvaluationPeriodSeconds
+      Threshold: !Ref DatabaseAlarmReadLatencyMaxSeconds
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Ref AuroraClusterMultipleUser
+        - Name: Role
+          Value: WRITER
+      AlarmActions:
+        - !Ref DatabaseAlarmTopic
+    DependsOn: AuroraClusterMultipleUser
+
+  DatabaseInsertLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: AlarmsEnabled
+    Properties:
+      AlarmDescription: !Sub DB insert latency is over ${DatabaseAlarmWriteLatencyMaxSeconds} for ${DatabaseAlarmEvaluationPeriods} period(s) of ${DatabaseAlarmEvaluationPeriodSeconds} seconds
+      TreatMissingData: notBreaching
+      Namespace: AWS/RDS
+      MetricName: InsertLatency
+      Unit: Seconds
+      Statistic: Average
+      EvaluationPeriods: !Ref DatabaseAlarmEvaluationPeriods
+      Period: !Ref DatabaseAlarmEvaluationPeriodSeconds
+      Threshold: !Ref DatabaseAlarmWriteLatencyMaxSeconds
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Ref AuroraClusterMultipleUser
+        - Name: Role
+          Value: WRITER
+      AlarmActions:
+        - !Ref DatabaseAlarmTopic
+    DependsOn: AuroraClusterMultipleUser
+
+  DatabaseUpdateLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: AlarmsEnabled
+    Properties:
+      AlarmDescription: !Sub DB update latency is over ${DatabaseAlarmWriteLatencyMaxSeconds} for ${DatabaseAlarmEvaluationPeriods} period(s) of ${DatabaseAlarmEvaluationPeriodSeconds} seconds
+      TreatMissingData: notBreaching
+      Namespace: AWS/RDS
+      MetricName: UpdateLatency
+      Unit: Seconds
+      Statistic: Average
+      EvaluationPeriods: !Ref DatabaseAlarmEvaluationPeriods
+      Period: !Ref DatabaseAlarmEvaluationPeriodSeconds
+      Threshold: !Ref DatabaseAlarmWriteLatencyMaxSeconds
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Ref AuroraClusterMultipleUser
+        - Name: Role
+          Value: WRITER
+      AlarmActions:
+        - !Ref DatabaseAlarmTopic
+    DependsOn: AuroraClusterMultipleUser
+
+  DatabaseDeleteLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: AlarmsEnabled
+    Properties:
+      AlarmDescription: !Sub DB update latency is over ${DatabaseAlarmWriteLatencyMaxSeconds} for ${DatabaseAlarmEvaluationPeriods} period(s) of ${DatabaseAlarmEvaluationPeriodSeconds} seconds
+      TreatMissingData: notBreaching
+      Namespace: AWS/RDS
+      MetricName: DeleteLatency
+      Unit: Seconds
+      Statistic: Average
+      EvaluationPeriods: !Ref DatabaseAlarmEvaluationPeriods
+      Period: !Ref DatabaseAlarmEvaluationPeriodSeconds
+      Threshold: !Ref DatabaseAlarmWriteLatencyMaxSeconds
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Ref AuroraClusterMultipleUser
+        - Name: Role
+          Value: WRITER
+      AlarmActions:
+        - !Ref DatabaseAlarmTopic
+    DependsOn: AuroraClusterMultipleUser
+
+
+Outputs:
+  Name:
+    Description: Aurora Stack Name
+    Value: !Ref AWS::StackName
+    Export:
+      Name: !Sub ${AWS::StackName}-Name
+
+  AuroraClusterId:
+    Description: Aurora Cluster ID
+    Value: !Ref AuroraClusterMultipleUser
+    Export:
+      Name: !Sub ${AWS::StackName}-AuroraClusterID
+
+  AuroraClusterArn:
+    Description: Aurora Cluster Arn
+    Value: !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:${AuroraClusterMultipleUser}
+    Export:
+      Name: !Sub ${AWS::StackName}-AuroraClusterArn
+
+  AuroraDbURL:
+    Description: Aurora Database URL
+    Value: !GetAtt AuroraClusterMultipleUser.Endpoint.Address
+    Export:
+      Name: !Sub ${AWS::StackName}-DatabaseURL
+
+  AuroraReadDbURL:
+    Description: Aurora Database Read URL
+    Value: !GetAtt AuroraClusterMultipleUser.ReadEndpoint.Address
+    Export:
+      Name: !Sub ${AWS::StackName}-DatabaseReadURL
+
+  DbUser:
+    Description: RDS Database admin account user
+    Value: !Join ['', ['{{resolve:secretsmanager:', !Ref rDatabaseCredentialMasterSecret, ':SecretString:username}}' ]]
+    Export:
+      Name: !Sub ${AWS::StackName}-DatabaseUser
+
+  DatabaseAlarmTopicArn:
+    Description: Database Alarm Topic ARN
+    Condition: AlarmsEnabled
+    Value: !Ref DatabaseAlarmTopic
+    Export:
+      Name: !Sub ${AWS::StackName}-DatabaseAlarmTopicArn
+
+  DatabaseAlarmTopicName:
+    Description: Database Alarm Topic Name
+    Condition: AlarmsEnabled
+    Value: !GetAtt DatabaseAlarmTopic.TopicName
+    Export:
+      Name: !Sub ${AWS::StackName}-DatabaseAlarmTopicName
+
+  DBName:
+    Description: Database Name
+    Value: !Ref DatabaseName
+    Export:
+      Name: !Sub ${AWS::StackName}-DatabaseName
+
+  AuroraDBPort:
+    Description: Database Port
+    Value: !GetAtt AuroraClusterMultipleUser.Endpoint.Port
+    Export:
+      Name: !Sub ${AWS::StackName}-DatabasePort
+
+  DBSecretMasterUserArn:
+    Description: Secrets Manager ARN containing Database Master Username and Password
+    Value: !Ref rDatabaseCredentialMasterSecret
+    Export:
+      Name: !Sub ${AWS::StackName}-DatabaseMasterUserSecretsManagerArn
+
+  DBSecretApplicationUserArn:
+    Description: Secrets Manager ARN containing Database Application Username and Password
+    Value: !Ref rDatabaseCredentialApplicationSecret
+    Export:
+      Name: !Sub ${AWS::StackName}-DatabaseApplicatonUserSecretsManagerArn
+
+  StackName: 
+    Value: !Ref AWS::StackName
+    Export:
+      Name: !Sub ${AWS::StackName}-Stackname

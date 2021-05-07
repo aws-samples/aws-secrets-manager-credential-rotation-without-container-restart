@@ -1,0 +1,27 @@
+Parameters:
+  ApplicationUserLambdaArn:
+    Type: String
+  SingleUserIAMAuthenticationLambdaArn:
+    Type: String
+  TwoUserIAMAuthenticationLambdaArn:
+    Type: String
+  
+
+Resources:
+  ApplicationuserLambdaInvoke:
+    Type: AWS::CloudFormation::CustomResource
+    Version: "1.0"
+    Properties:
+      ServiceToken: !Ref ApplicationUserLambdaArn
+
+  SingleUserIAMAuthenticationLambdaInvoke:
+    Type: AWS::CloudFormation::CustomResource
+    Version: "1.0"
+    Properties:
+      ServiceToken: !Ref SingleUserIAMAuthenticationLambdaArn
+
+  TwoUserIAMAuthenticationLambdaInvoke:
+    Type: AWS::CloudFormation::CustomResource
+    Version: "1.0"
+    Properties:
+      ServiceToken: !Ref TwoUserIAMAuthenticationLambdaArn

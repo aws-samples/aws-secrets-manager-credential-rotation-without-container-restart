@@ -1,0 +1,63 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: RDS IAM Authentication IAM Policy and Database Account
+
+Parameters:
+  #pDatabaseInstanceId:
+  #  Description: Database Instance Id
+  #  Type: String
+  pDBClusterIdentifier:
+    Description: Database Cluster Id
+    Type: String
+
+Resources:
+  rDbInstanceIdLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+              - "lambda.amazonaws.com"
+          Action:
+            - sts:AssumeRole
+      Policies:
+        - PolicyName: DescribeRDSInstances
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "rds:DescribeDBClusters"
+                  - "rds:DescribeDBInstances"
+                Resource:
+                  - !Sub "arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:${pDBClusterIdentifier}"
+        - PolicyName: WriteToCloudWatch
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                  - "logs:CreateLogGroup"
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*:*:*"
+
+  rDBInstanceIdLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Fetches the Database Resource ID required for IAM Database Authentication
+      Timeout: 45
+      Role: !GetAtt rDbInstanceIdLambdaRole.Arn
+      Handler: app.lambda_handler
+      Runtime: python3.8
+      CodeUri: ../functions/source/database-resource-id-custom-resource
+
+  rDbiResourceId:
+    Type: Custom::DatabaseResourceId
+    Properties:
+      ServiceToken: !GetAtt [ rDBInstanceIdLambda, Arn ]
+      DBClusterIdentifier: !Ref pDBClusterIdentifier
+

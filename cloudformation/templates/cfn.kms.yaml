@@ -1,0 +1,82 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: Columnar KMS AWS managed CMK for Amazon Aurora
+
+Parameters:
+  KeyAdministratorRole:
+    Type: String
+    Description: This is the IAM Role that is managing the CMK. Be sure that the key policy that you create allows the current user to administer the CMK. https://aws.amazon.com/premiumsupport/knowledge-center/update-key-policy-future/
+
+Resources:
+  EncryptionAtRestCMK:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: RDS Encryption at rest
+      Enabled: true
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        #The kms:ViaService condition key limits use of an AWS KMS customer master key (CMK) to requests from specified AWS services.
+        #https://docs.aws.amazon.com/kms/latest/developerguide/policy-conditions.html#conditions-kms-via-service
+        Statement:
+          #Be sure that the key policy that you create allows the current user to administer the CMK.
+          #https://aws.amazon.com/premiumsupport/knowledge-center/update-key-policy-future/
+          #Error Message will be - The new key policy will not allow you to update the key policy in the future.
+        - Sid: 'Allow administration of the key'
+          Effect: 'Allow'
+          Principal:
+            AWS:
+              - !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+              - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${KeyAdministratorRole}'
+          Action:
+          - 'kms:Describe*'
+          - 'kms:Get*'
+          - 'kms:List*'
+          - 'kms:Put*'
+          - 'kms:RevokeGrant'
+          - 'kms:Enable*'
+          - 'kms:Delete*'
+          - 'kms:CancelKeyDeletion'
+          - 'kms:ScheduleKeyDeletion'
+          Resource: '*'
+        - Sid: 'Deny cryptographic operations on key for Key Administrator'
+          Effect: 'Deny'
+          Principal:
+            AWS:
+              - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${KeyAdministratorRole}'
+          Action:
+          - 'kms:Encrypt*'
+          - 'kms:Decrypt*'
+          - 'kms:GenerateDataKey**'
+          - 'kms:CreateGrant*'
+          - 'kms:ReEncrypt*'
+          Resource: '*'
+        - Sid: 'Allow access through RDS for all principals in the account that are authorized to use RDS'
+          Effect: 'Allow'
+          Principal:
+            AWS: '*'
+          Action:
+            - 'kms:Encrypt'
+            - 'kms:Decrypt'
+            - 'kms:ReEncrypt*'
+            - 'kms:GenerateDataKey*'
+            - 'kms:CreateGrant'
+            - 'kms:ListGrants'
+            - 'kms:DescribeKey'
+          Resource: '*'
+          Condition:
+            StringEquals:
+              'kms:CallerAccount': !Sub '${AWS::AccountId}'
+              'kms:ViaService': !Sub 'rds.${AWS::Region}.amazonaws.com'
+
+Outputs:
+  EncryptionAtRestCMKArn:
+    Description: Encryption at Rest CMK Arn
+    Value: !GetAtt EncryptionAtRestCMK.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-EncryptionAtRestCMKArn"
+
+  StackName:
+    Value: !Ref AWS::StackName
+    Export:
+      Name: !Sub "${AWS::StackName}-Stackname"
